@@ -14,7 +14,7 @@ Goal: confirm the assumptions the driver is built on, from the UEFI shell, befor
 | Check | How | Expected |
 |---|---|---|
 | Memory map has SMHC0 | UEFI shell `memmap` / `dmem 0x04020000 0x10` | `0x04020000` is device memory, readable |
-| Module clock is 24 MHz (U11) | `mm 0x03001830 -w 4` (CCU `MMC0_CLK_REG`; **CCU base `0x03001000` is itself UNVERIFIED**) | bit 31 set (enabled); bits 25:24 = 0 (OSC24M); N (9:8) = 0, M (3:0) = 0 |
+| Module clock is 24 MHz (U11) | `mm 0x03001830 -w 4` (CCU `MMC0_CLK_REG`; CCU base `0x03001000` per the H616 DT, register offset `0x830` per u-boot) | bit 31 set (enabled); bits 25:24 = 0 (OSC24M); N (9:8) = 0, M (3:0) = 0 |
 | Bus clock/reset released | `mm 0x0300184C -w 4` (`MMC_BGR_REG`) | MMC0 gate (bit 0) and reset (bit 16) set — bit positions UNVERIFIED |
 | SMHC alive | `mm 0x04020000 -w 4` … dump 0x00–0x8C | `GCTRL` readable (not `0xFFFFFFFF`); `CLKCR` (0x04) may show bit 16 (clock on) |
 | Card VDD up | multimeter on the socket VDD pin | 3.3 V (DLDO1) |

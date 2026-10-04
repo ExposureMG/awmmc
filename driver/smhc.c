@@ -153,6 +153,8 @@ SmhcSlotInitialize(
         //
         Capabilities->Flags.UsePioForRead = TRUE;
         Capabilities->Flags.UsePioForWrite = TRUE;
+        Capabilities->PioTransferMaxThreshold =
+            SMHC_MAX_BLOCK_SIZE * SMHC_MAX_BLOCK_COUNT;     // UNVERIFIED: meaning in sdport (sample: 64)
     }
 
     //
@@ -201,6 +203,15 @@ SmhcSlotInitialize(
                        Length,
                        SMHC_MIN_REGISTER_SPACE);
 
+        Status = STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    //
+    // A gated bus clock or a reset left asserted by firmware shows up as an
+    // all-ones read (or, on ARM64, as an external abort that this cannot catch).
+    //
+    if (NT_SUCCESS(Status) && (SmhcRead(Ext, SMHC_REG_GCTRL) == 0xFFFFFFFFUL)) {
+        SMHC_LOG_ERROR("SMHC registers read as all ones: bus clock gated / in reset?\n");
         Status = STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
@@ -360,6 +371,10 @@ SmhcSlotInterrupt(
     *SdioInterrupt = FALSE;
     *Tuning = FALSE;
 
+    if (!Ext->Initialized) {
+        return FALSE;
+    }
+
     //
     // [LX] sunxi_mmc_irq: MISTA (masked) + IDST.  IDST is a raw status, so only the
     // bits enabled in IDIE count as ours.
@@ -396,10 +411,11 @@ SmhcSlotInterrupt(
     SmhcConvertInterrupts(Mint, Idst, Ext->AutoStopActive, Events, Errors);
 
     //
-    // Something of ours was acknowledged, so the interrupt is handled even if it
-    // translated to no sdport event (e.g. DATA_OVER of an auto-stop transfer).
+    // As sdhc.c / dwcmshc.cpp: report "handled" only if there is something for sdport
+    // to act on.  Bits that translate to nothing (e.g. DATA_OVER of an auto-stop
+    // transfer) have been acknowledged and have deasserted the level interrupt.
     //
-    return TRUE;
+    return (*Events != 0) || (*Errors != 0);
 }
 
 NTSTATUS
@@ -420,6 +436,8 @@ SmhcSlotIssueRequest(
     //
     // One request at a time (MaximumOutstandingRequests = 1).
     //
+    InterlockedExchange(&Ext->PhaseClaim, 0);
+
     if (InterlockedExchangePointer((PVOID volatile *)&Ext->OutstandingRequest, Request) != NULL) {
         SMHC_LOG_WARN("request issued while another was outstanding; previous one dropped\n");
     }
@@ -467,6 +485,10 @@ SmhcSlotToggleEvents(
     ULONG Bits;
 
     Ext = (PSMHC_EXTENSION)PrivateExtension;
+    if (!Ext->Initialized) {
+        return;
+    }
+
     Bits = SmhcEventsToIntMask(EventMask);
 
     //
@@ -489,7 +511,9 @@ SmhcSlotClearEvents(
     PSMHC_EXTENSION Ext;
 
     Ext = (PSMHC_EXTENSION)PrivateExtension;
-    SmhcWrite(Ext, SMHC_REG_RINT, SmhcEventsToIntMask(EventMask));
+    if (Ext->Initialized) {
+        SmhcWrite(Ext, SMHC_REG_RINT, SmhcEventsToIntMask(EventMask));
+    }
 }
 
 VOID
@@ -557,6 +581,20 @@ SmhcRequestDpc(
             return;
         }
 
+        if (InterlockedCompareExchange(&Ext->PhaseClaim, 1, 0) != 0) {
+            return;                         // the phase is already being completed elsewhere
+        }
+
+        //
+        // The card is left in its data state unless the command itself failed.
+        //
+        if ((Request->Command.TransferType != SdTransferTypeNone) &&
+            (Request->Command.TransferType != SdTransferTypeUndefined) &&
+            !(AllErrors & SDPORT_ERROR_CMD_TIMEOUT)) {
+
+            InterlockedExchange(&Ext->NeedStop, 1);
+        }
+
         Request->RequiredEvents = 0;
         Status = SmhcConvertErrorToStatus(AllErrors);
         SMHC_LOG_WARN("CMD%lu failed: errors 0x%X -> 0x%08X\n",
@@ -568,6 +606,10 @@ SmhcRequestDpc(
         SmhcCompleteRequest(Ext, Request, Status);
 
     } else if (Request->RequiredEvents == 0) {
+        if (InterlockedCompareExchange(&Ext->PhaseClaim, 1, 0) != 0) {
+            return;
+        }
+
         if (Request->Status != STATUS_MORE_PROCESSING_REQUIRED) {
             Request->Status = STATUS_SUCCESS;
         }
@@ -597,6 +639,13 @@ SmhcRestoreContext(
     Ext = (PSMHC_EXTENSION)PrivateExtension;
     if (Ext->Initialized) {
         SmhcRestoreRegisters(Ext);
+
+        //
+        // CLKCR is restored without the clock-on bits; latch it and bring the card
+        // clock back if it was running ([LX] runtime_resume: init_host, set_bus_width,
+        // set_clk).
+        //
+        SmhcSetClock(Ext, Ext->BusFrequencyKhz);
     }
 }
 

@@ -46,6 +46,7 @@ void emu_init(void)
     memset(&emu, 0, sizeof(emu));
     emu.inject_data_crc_after_words = -1;
     emu.reset_clears_regs = 1;
+    emu.stop_imask = 0xFFFFFFFFu;
     emu.busy_polls_after_write = 5;
     /* firmware leftovers: 24 MHz module clock, clock running, 4-bit */
     R(SMHC_REG_CLKCR) = SMHC_CLKCR_CARD_CLOCK_ON;
@@ -251,6 +252,7 @@ static void exec_command(uint32_t cmd, uint32_t arg)
 
     if ((cmd & SMHC_CMD_STOP_ABORT) && idx == 12) {
         emu.stop_cmds++;
+        emu.stop_imask = R(SMHC_REG_IMASK);
         /* abort any running transfer */
         emu.rd_active = emu.wr_active = 0;
     }

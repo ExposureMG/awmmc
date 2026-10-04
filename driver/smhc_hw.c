@@ -292,8 +292,10 @@ SmhcRestoreRegisters(
     SmhcWrite(Ext, SMHC_REG_GCTRL, Gctrl);
 
     //
-    // New timing mode.  [UB-C] mmc_set_mod_clk and [LX] sunxi_mmc_clk_set_rate both
-    // set NTSR bit 31 on H616 (needs_new_timings); [LX]: "Don't touch the delay bits".
+    // New timing mode.  [LX] sunxi_mmc_clk_set_rate sets NTSR bit 31 when
+    // use_new_timings, which sun50i_h616_cfg.needs_new_timings forces; [LX]: "Don't
+    // touch the delay bits".  ([UB-C] mmc_set_mod_clk does the same only under
+    // CONFIG_MMC_SUNXI_HAS_NEW_MODE, which the fetched files do not show for H616.)
     //
     SmhcWrite(Ext,
               SMHC_REG_NTSR,
@@ -383,6 +385,13 @@ SmhcSendStopCommandPolled(
     ULONG Elapsed;
     NTSTATUS Status;
 
+    //
+    // sdport has already re-enabled interrupts when it calls SdResetTypeDat; with
+    // COMMAND_DONE unmasked the ISR would acknowledge the very bit polled below.
+    // Mask everything at the register (the shadow keeps sdport's enables and
+    // SmhcSoftReset writes it back afterwards).
+    //
+    SmhcWrite(Ext, SMHC_REG_IMASK, 0);
     SmhcWrite(Ext, SMHC_REG_RINT, SMHC_INT_ALL);
     SmhcWrite(Ext, SMHC_REG_ARG, 0);
     SmhcWrite(Ext,
@@ -403,6 +412,7 @@ SmhcSendStopCommandPolled(
     }
 
     SmhcWrite(Ext, SMHC_REG_RINT, SMHC_INT_ALL);
+    SmhcWrite(Ext, SMHC_REG_IMASK, (ULONG)Ext->ImaskShadow);
     return Status;
 }
 
@@ -424,9 +434,6 @@ SmhcResetHost(
                   (PVOID volatile *)&Ext->OutstandingRequest, NULL);
 
     FailedData = (Request != NULL) && SmhcHasData(&Request->Command);
-    if (FailedData) {
-        InterlockedExchange(&Ext->NeedStop, 1);
-    }
 
     switch (ResetType) {
     case SdResetTypeAll:
@@ -814,6 +821,7 @@ SmhcSendCommand(
     Ext->AutoStopActive = FALSE;
     InterlockedExchange(&Ext->CurrentEvents, 0);
     InterlockedExchange(&Ext->CurrentErrors, 0);
+    InterlockedExchange(&Ext->PhaseClaim, 0);
 
     if (HasData) {
         if (Command->TransferMethod == SdTransferMethodSgDma) {
@@ -952,11 +960,28 @@ SmhcStartPioTransfer(
     ULONG Status;
     ULONG Done;
     ULONG CurrentEvents;
+    ULONG CurrentErrors;
     BOOLEAN Read;
 
     Command = &Request->Command;
     Read = (Command->TransferDirection == SdTransferDirectionRead);
     Buffer = (PULONG)Command->DataBuffer;
+
+    //
+    // An error that arrived between phases was recorded by the DPC but could not
+    // complete the request (nothing was being waited for): fail it now rather than
+    // wait for events that will never come.
+    //
+    CurrentErrors = (ULONG)InterlockedCompareExchange(&Ext->CurrentErrors, 0, 0);
+    if (CurrentErrors != 0) {
+        InterlockedExchange(&Ext->CurrentErrors, 0);
+        Request->RequiredEvents = 0;
+        InterlockedExchange(&Ext->PhaseClaim, 1);
+        SmhcCompleteRequest(Ext, Request, SmhcConvertErrorToStatus(CurrentErrors));
+        return STATUS_PENDING;
+    }
+
+    InterlockedExchange(&Ext->PhaseClaim, 0);
 
     //
     // Events the DPC has already seen for this command.  Not cleared here: DATA_OVER
@@ -981,8 +1006,8 @@ SmhcStartPioTransfer(
 
             //
             // A completely full FIFO can report level 0 ([UB-C]: "Some SoCs (A20)
-            // report a level of 0 if the FIFO is completely full").  Assume the
-            // smallest plausible depth in that case.
+            // report a level of 0 if the FIFO is completely full"; u-boot then
+            // assumes 32 words).  Assume 16, the smallest depth ([LX] SDXC_FIFO_SIZE).
             //
             if ((Words == 0) && (Status & SMHC_STATUS_FIFO_FULL)) {
                 Words = 16;
@@ -1030,11 +1055,34 @@ SmhcStartPioTransfer(
     } else {
         Request->Status = STATUS_SUCCESS;
 
+        //
+        // Make sure the end-of-data interrupt is enabled for the last phase
+        // (ToggleEvents may have disabled it in between).
+        //
+        SmhcImaskUpdate(Ext,
+                        Ext->AutoStopActive ? SMHC_INT_AUTO_COMMAND_DONE : SMHC_INT_DATA_OVER,
+                        0);
+
         if (CurrentEvents & SDPORT_EVENT_CARD_RW_END) {
+            InterlockedExchange(&Ext->PhaseClaim, 1);
             SmhcCompleteRequest(Ext, Request, Request->Status);
 
         } else {
             Request->RequiredEvents |= SDPORT_EVENT_CARD_RW_END;
+
+            //
+            // The end-of-data event may have been delivered on another processor
+            // between the snapshot above and the line before: the DPC saw nothing
+            // to wait for and only recorded it.  Look again, and claim the
+            // completion so the DPC cannot complete the same phase too.
+            //
+            if (((ULONG)InterlockedCompareExchange(&Ext->CurrentEvents, 0, 0) &
+                 SDPORT_EVENT_CARD_RW_END) &&
+                (InterlockedCompareExchange(&Ext->PhaseClaim, 1, 0) == 0)) {
+
+                Request->RequiredEvents = 0;
+                SmhcCompleteRequest(Ext, Request, Request->Status);
+            }
         }
     }
 
@@ -1052,9 +1100,8 @@ SmhcStartDmaTransfer(
     // sample's SdhcStartAdmaTransfer / dwcmshc's MshcStartDmaTransfer just
     // complete the phase.
     //
-    UNREFERENCED_PARAMETER(Ext);
-
     Request->Status = STATUS_SUCCESS;
+    InterlockedExchangePointer((PVOID volatile *)&Ext->OutstandingRequest, NULL);
     SdPortCompleteRequest(Request, Request->Status);
     return STATUS_SUCCESS;
 }
@@ -1211,6 +1258,13 @@ SmhcBusyWorker(
     }
 
     //
+    // A reset may have aborted the request while we were waiting.
+    //
+    if (Ext->OutstandingRequest != Request) {
+        return;
+    }
+
+    //
     // Re-enter with RequiredEvents == 0 and the busy condition resolved.
     //
     Request->RequiredEvents = 0;
@@ -1261,12 +1315,6 @@ SmhcCompleteRequest(
     // CARD_RW_END / DMA_COMPLETE); PIO data is complete with the final
     // SdRequestTypeStartTransfer.  Any failure ends the phase.
     //
-    if (HasData && (Request->Status != STATUS_SUCCESS) &&
-        (Request->Status != STATUS_MORE_PROCESSING_REQUIRED)) {
-
-        InterlockedExchange(&Ext->NeedStop, 1);
-    }
-
     if (HasData && (Request->Status != STATUS_MORE_PROCESSING_REQUIRED)) {
         BOOLEAN Finished;
 

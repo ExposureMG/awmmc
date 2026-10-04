@@ -38,6 +38,7 @@ typedef struct {
     EMU_CMD_LOG log[EMU_MAX_LOG];
     int log_count;
     int stop_cmds;                  /* manual CMD12 with STOP_ABORT */
+    uint32_t stop_imask;            /* IMASK value when the last STOP_ABORT command was written */
     int fifo_resets;
     int fifo_reset_during_xfer;     /* FIFO reset while data was still pending: a driver bug */
 

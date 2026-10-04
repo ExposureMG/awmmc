@@ -170,8 +170,9 @@ Abstract:
 
 //
 // Error group handed to sdport.  Deliberately excludes VOLTAGE_CHANGE_DONE
-// (bit 10), which [UB-H]/[LX] list inside their "error" mask (0xbfc2) but which
-// is a completion event of the voltage-switch sequence we do not implement.
+// (bit 10).  [UB-H] lists it inside its error mask (0xbfc2); [LX]'s
+// SDXC_INTERRUPT_ERROR_BIT excludes it and counts it as a "done" bit.  It belongs
+// to the voltage-switch sequence, which this driver does not implement.
 //
 #define SMHC_INT_ERRORS \
     (SMHC_INT_RESP_ERROR | SMHC_INT_RESP_CRC_ERROR | SMHC_INT_DATA_CRC_ERROR | \
@@ -327,7 +328,7 @@ typedef struct _SMHC_IDMAC_DESCRIPTOR {
 // version.  The firmware leaves SMHC0 clocked at 24 MHz (see docs).
 //   [UB-CCU] CCU_MMC0_CLK_CFG 0x830, CCU_H6_MMC_GATE_RESET 0x84c,
 //            CCM_MMC_CTRL_M/N/OSCM24/PLL6/ENABLE.
-//   CCU base 0x03001000 is UNVERIFIED (not present in the fetched files).
+//   CCU base 0x03001000: [LX-DT] sun50i-h616.dtsi, node ccu: clock@3001000, reg = <0x03001000 0x1000>.
 // ---------------------------------------------------------------------------
 //
 

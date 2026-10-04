@@ -48,7 +48,7 @@ Reference tags used throughout (all fetched from `master`, 2026-10-04):
 
 **None** for this version — the node in the task is used unchanged (`acpi/sdc0.asl`). Future needs (not used by the
 driver today): two small `Memory32Fixed` windows for the CCU to go beyond 24 MHz; a GPIO and a PMIC path for
-card detect and 1.8 V. See the comment block in `acpi/sdc0.asl`. **UNVERIFIED:** CCU base `0x03001000`.
+card detect and 1.8 V. See the comment block in `acpi/sdc0.asl`. (CCU base `0x03001000` is confirmed by `[LX-DT]`; the MMC gate/reset bit positions are not, U10.)
 
 ## 2. Source layout
 
@@ -153,7 +153,7 @@ Not offered: 8-bit bus, High-Speed, SDR50/DDR50/SDR104/HS200/HS400, 1.8 V signal
 | U7 | sdport/HAL cache maintenance of data buffers on `_CCA=0` | sdport.h and its DMA setup not available | run DMA mode with `TransferMode=1`, compare SHA-256 of large files; if corrupt, test with uncached buffers |
 | U8 | size and cacheability of sdport's descriptor buffer | not documented in the sample | check `NumberOfElements` vs buffer in a debugger; builder fails safely if its computed bound is exceeded |
 | U9 | whether sdport honours `Supported.Voltage33V` etc. | `[MS]` assigns them without effect, `[DW]` says "SDPORT doesn't seem to care" | none needed unless enumeration fails |
-| U10 | CCU base `0x03001000` and gate/reset bit positions for MMC0 | only the `0x830`/`0x84C` offsets are in u-boot's header | needed only for 50 MHz (future work) |
+| U10 | gate/reset bit positions for MMC0 in `0x84C` | CCU base `0x03001000` is confirmed (`[LX-DT]` `ccu: clock@3001000`) and the `0x830`/`0x84C` offsets are in u-boot's header, the per-instance bits are not | needed only for 50 MHz (future work) |
 | U11 | whether the firmware really leaves the module clock at 24 MHz (OSC24M, no N/M division) | owner's statement, nothing to check in this repo | read `0x0300 1830` in UEFI, or measure; set `ModuleClockHz` accordingly |
 | U12 | `DBGC = 0xdeb` and `FUNCSEL = CEATA_ON` (written by Linux `sunxi_mmc_init_host`) are *not* written | "undocumented" in Linux; u-boot does not write them | add them only if reads/errors point to it |
 | U13 | `THLDC` card-threshold (`READ_THLD(512)\|WRITE_EN\|READ_EN`) | written by u-boot only ("Needed on H616"), Linux does not | if PIO reads of < 512 bytes misbehave, try without |
@@ -162,10 +162,32 @@ Not offered: 8-bit bus, High-Speed, SDR50/DDR50/SDR104/HS200/HS400, 1.8 V signal
 
 Open design questions for the owner: none blocking; see the test plan for the order in which these get answered.
 
+## 8b. Independent review (phase 4)
+A separate reviewer read all driver sources against the references. Findings and disposition:
+
+| Finding | Disposition |
+|---|---|
+| Polled CMD12 in `SdResetTypeDat` raced with the ISR (sdport has re-enabled interrupts; the ISR would ack the polled bit, stalling the reset ~1 s) | **fixed**: `IMASK` is zeroed during the poll, restored from the shadow afterwards; test asserts it |
+| `NeedStop` set for every failed data request (incl. response timeouts) | **fixed**: set by the DPC only when the card can be in its data state |
+| DMA `StartTransfer` left `OutstandingRequest` pointing at a completed request | **fixed** + test |
+| `RestoreContext` did not re-enable the card clock | **fixed** (re-applies the clock) |
+| Error arriving between PIO phases ignored → request waits forever | **fixed**: `StartTransfer` checks recorded errors (`CurrentErrors`) |
+| Possible lost `DATA_OVER` wake-up in the last PIO phase if ISR/DPC run on another CPU | **mitigated**: re-check after arming + `PhaseClaim` so only one party completes a phase. Not testable in the single-threaded harness |
+| ISR returned TRUE for events that map to nothing | **fixed**: returns `Events != 0 \|\| Errors != 0` as the references |
+| Busy worker could complete an aborted request | **fixed** |
+| Last PIO phase did not re-assert `DATA_OVER`/`AUTO_COMMAND_DONE` in `IMASK` | **fixed** |
+| Registers/ISR touched before/without successful init; all-ones read | **fixed**: `Initialized` guards ISR/Toggle/Clear; all-ones `GCTRL` read fails init. (An external abort on an ungated block cannot be caught.) |
+| PIO-only mode left `PioTransferMaxThreshold = 0` | **changed** to "everything"; meaning in sdport UNVERIFIED |
+| Comment errors (Linux's error mask excludes bit 10; NTSR attribution; CCU base is in the DT) | **fixed** |
+| `IDIE` only enables RX, so IDMAC error bits are never reported; errors surface as `DATA_TIMEOUT` (as in Linux) | open (bit layout unverified) |
+| `THLDC` 512-byte read threshold applies to DMA too; only u-boot (PIO) sets it | open (U13) |
+| Descriptor-buffer capacity unknown; Linux caps at 256 descriptors | open (U8) |
+| Race findings cannot be reproduced by the single-threaded harness | open: needs an interleaving test or hardware |
+
 ## 9. What has been checked, and how
 * `make -C tests check` (also run by `.github/workflows/host-tests.yml`):
   * unit tests of the divider rule (both readings of §5 must stay ≤ the target), event mapping, R2 formatting and the IDMAC chain builder;
-  * flow tests that drive the real `smhc.c`/`smhc_hw.c` through the sdport request choreography against a register-level SMHC model:
+  * flow tests (225 checks) that drive the real `smhc.c`/`smhc_hw.c` through the sdport request choreography against a register-level SMHC model:
     init + clock programming, CMD0/8/41/2/3/7 command words and R2 formatting, PIO single/multi-block reads and writes (level- *and* edge-triggered data requests,
     FIFO smaller than the transfer, tails below the watermark), scatter/gather DMA (discontiguous elements, a 192 KiB element split into 64 KiB descriptors, delayed IDMAC copy), response timeout with late `COMMAND_DONE`,
     data CRC error and data timeout followed by the sdport reset sequence, state restoration after reset, undersized register window.

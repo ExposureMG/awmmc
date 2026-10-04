@@ -27,7 +27,7 @@ Device (SDC0)
 //  * Faster than the firmware's 24 MHz (50 MHz High-Speed): the driver must program the SMHC0
 //    module clock itself (CCU MMC0_CLK_REG 0x830 and the MMC bus gate/reset register 0x84C,
 //    offsets from u-boot clock_sun50i_h6.h).  That needs two extra Memory32Fixed windows, e.g.
-//        Memory32Fixed (ReadWrite, 0x03001830, 0x4)   // MMC0 clock    (CCU base 0x03001000 UNVERIFIED)
+//        Memory32Fixed (ReadWrite, 0x03001830, 0x4)   // MMC0 clock    (CCU base 0x03001000 per sun50i-h616.dtsi)
 //        Memory32Fixed (ReadWrite, 0x0300184C, 0x4)   // MMC gate/reset
 //    The driver does not look at a second memory resource yet.
 //

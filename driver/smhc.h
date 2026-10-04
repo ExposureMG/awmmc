@@ -24,6 +24,9 @@ Environment:
 
 #include <ntddk.h>
 #include <sdport.h>
+#if defined(_ARM64_) || defined(_M_ARM64)
+#include <intrin.h>
+#endif
 
 #include "smhc_core.h"
 
@@ -32,8 +35,6 @@ Environment:
 // Tunables / defaults.
 // ---------------------------------------------------------------------------
 //
-
-#define SMHC_ALLOC_TAG                  ULONG('chmS')
 
 //
 // Module clock the firmware leaves programmed for SMHC0 (mu-silicium: 24 MHz,
@@ -155,6 +156,7 @@ typedef struct _SMHC_EXTENSION {
     volatile BOOLEAN AutoStopActive;        // current data command uses AUTO_STOP (ISR reads this)
     volatile LONG BusyPending;              // completion deferred to the busy work item
     volatile LONG NeedStop;                 // a data request failed: card still in the data state
+    volatile LONG PhaseClaim;               // 1 = the current request phase is being completed (DPC vs StartTransfer)
 
     //
     // Data phase.

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "emu.h"
+#include "../driver/smhc.h"
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING);
 
@@ -108,6 +109,23 @@ static int has_data(SDPORT_COMMAND *c)
 }
 
 /* Run a full request the way sdport would, including the data phases. */
+static uint32_t g_between_phase_err;        /* RINT bit raised after the command phase, before StartTransfer */
+
+static void service_irqs(SDPORT_REQUEST *req)
+{
+    int i;
+    for (i = 0; i < 100 && emu_irq_line(); i++) {
+        ULONG ev, er;
+        BOOLEAN cc, sdio, tun;
+        if (g_init.Interrupt(g_ext, &ev, &er, &cc, &sdio, &tun)) {
+            int saved = g_mock_irql;
+            g_mock_irql = DISPATCH_LEVEL;
+            g_init.RequestDpc(g_ext, req, ev, er);
+            g_mock_irql = saved;
+        }
+    }
+}
+
 static NTSTATUS port_do(SDPORT_REQUEST *req)
 {
     NTSTATUS st;
@@ -119,6 +137,12 @@ static NTSTATUS port_do(SDPORT_REQUEST *req)
     st = port_issue_once(req);
     if (st != STATUS_SUCCESS || !has_data(&req->Command)) {
         return st;
+    }
+
+    if (g_between_phase_err) {
+        emu.regs[SMHC_REG_RINT / 4] |= g_between_phase_err;
+        g_between_phase_err = 0;
+        service_irqs(req);                  /* the DPC sees a request with nothing left to wait for */
     }
 
     if (req->Command.TransferMethod == SdTransferMethodSgDma) {
@@ -533,6 +557,7 @@ static void test_dma(void)
     sg = make_sg(1, offs, lens);
     r = dma_req(17, 9, 1, 0, sg, desc);
     CHECK(port_do(&r) == STATUS_SUCCESS);
+    CHECK(((PSMHC_EXTENSION)g_ext)->OutstandingRequest == NULL);     /* released after the StartTransfer phase */
     CHECK(memcmp(emu_arena + base, &emu_card[9 * 512], 512) == 0);
     CHECK(!(emu.log[emu.log_count - 1].cmdreg & SMHC_CMD_AUTO_STOP));
     free(sg);
@@ -626,6 +651,8 @@ static void test_errors_and_reset(void)
     CHECK(emu.stop_cmds == stops);
     CHECK(NT_SUCCESS(busop_reset(SdResetTypeDat)));
     CHECK(emu.stop_cmds == stops + 1);                           /* manual CMD12 with STOP_ABORT */
+    CHECK(emu.stop_imask == 0);                                  /* interrupts masked while polling it */
+    CHECK(reg(SMHC_REG_IMASK) & SMHC_INT_COMMAND_DONE);          /* ... and sdport's enables are back */
     CHECK(reg(SMHC_REG_WIDTH) == SMHC_WIDTH_4BIT);
     CHECK(!(reg(SMHC_REG_GCTRL) & SMHC_GCTRL_ACCESS_BY_AHB));
 
@@ -639,6 +666,15 @@ static void test_errors_and_reset(void)
     CHECK(NT_SUCCESS(busop_reset(SdResetTypeCmd)));
     CHECK(NT_SUCCESS(busop_reset(SdResetTypeDat)));
     CHECK(emu.stop_cmds == stops + 2);
+
+    /* an error that lands between the command phase and StartTransfer must fail the
+       request instead of waiting for events that never come */
+    memset(buf, 0, sizeof(buf));
+    r = pio_req(17, 22, 1, 0, buf);
+    g_between_phase_err = SMHC_INT_DATA_CRC_ERROR;
+    CHECK(port_do(&r) == STATUS_CRC_ERROR);
+    CHECK(NT_SUCCESS(busop_reset(SdResetTypeCmd)));
+    CHECK(NT_SUCCESS(busop_reset(SdResetTypeDat)));
 
     /* and the host is usable afterwards */
     memset(buf, 0, sizeof(buf));
