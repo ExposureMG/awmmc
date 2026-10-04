@@ -38,7 +38,7 @@ ExcludeFromSelect = *
 
 [awmmc_Service_Inst]
 ServiceType    = %SERVICE_KERNEL_DRIVER%
-StartType      = %SERVICE_DEMAND_START%
+StartType      = %SERVICE_BOOT_START%
 ErrorControl   = %SERVICE_ERROR_NORMAL%
 ServiceBinary  = %13%\awmmc.sys
 LoadOrderGroup = System Bus Extender
