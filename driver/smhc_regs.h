@@ -325,7 +325,7 @@ typedef struct _SMHC_IDMAC_DESCRIPTOR {
 //
 // ---------------------------------------------------------------------------
 // H616 CCU (module clock) -- documented for reference, NOT used by this driver
-// version.  The firmware leaves SMHC0 clocked at 24 MHz (see docs).
+// version.  The firmware leaves SMHC0 clocked at 24 MHz.
 //   [UB-CCU] CCU_MMC0_CLK_CFG 0x830, CCU_H6_MMC_GATE_RESET 0x84c,
 //            CCM_MMC_CTRL_M/N/OSCM24/PLL6/ENABLE.
 //   CCU base 0x03001000: [LX-DT] sun50i-h616.dtsi, node ccu: clock@3001000, reg = <0x03001000 0x1000>.

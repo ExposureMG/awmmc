@@ -9,10 +9,6 @@ Targets mu-silicium UEFI, which leaves the SD card powered and clocked at 24 MHz
 |---|---|
 | `driver/` | source, INF source, VS/WDK project |
 | `acpi/sdc0.asl` | the ACPI node (unchanged from the task) with notes on what a future version would need |
-| `docs/01-reference-summary-and-architecture.md` | phase 1/2: reference summary and the original architecture proposal (partly superseded) |
-| `docs/02-design.md` | **design, register/flow mapping with source citations, unverified items, limitations** |
-| `docs/03-bringup-test-plan.md` | UEFI-side checks, WinDbg trace points, enumeration → read → write |
-| `docs/04-build-and-install.md` | build, test signing, install |
 | `tests/` | host-side mock + register-level emulator + tests (`make -C tests check`) |
 
 Scope of this version: 400 kHz identification, 24 MHz normal speed, 1/4-bit bus, PIO (default) or IDMAC scatter/gather DMA, 3.3 V only, no hot-plug, no UHS, no crash-dump.

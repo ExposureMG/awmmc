@@ -12,7 +12,7 @@ make -C tests syntax     # compile-check the driver sources only
   field order, types and event-bit values differ, so a clean host build says nothing about WDK compile errors.
 * `emu.c` models an SMHC and an SD card at register level (command execution, FIFO with a small depth, level- or edge-triggered data requests,
   IDMAC descriptor walking with a lagging copy, auto-CMD12, busy, fault injection, soft reset that wipes registers).
-  The model encodes the reading of the Linux/u-boot sources documented in `docs/02-design.md`; where those are silent it picks the pessimistic behaviour.
+  The model encodes this project's reading of the Linux/u-boot sources (cited in the comments of `driver/smhc_regs.h`); where those are silent it picks the pessimistic behaviour.
   Passing means *consistent with that model*, not *works on silicon*.
 * `test_flow.c` plays the part of sdport: it calls `IssueRequest`, services the (emulated) interrupt through the driver's `Interrupt` and `RequestDpc`, issues the PIO/DMA
   `StartTransfer` phases the way the Microsoft sample's request flow does, and runs the reset sequence after errors.
