@@ -1,6 +1,7 @@
 # AWMC0001 (Allwinner H616 SMHC0) sdport miniport — Phase 1 & 2
 
-Status: **phases 1 (reference summary) and 2 (architecture proposal) only. No driver code yet.**
+Status: phases 1 (reference summary) and 2 (architecture proposal). **Historical: the architecture was settled and
+implemented afterwards — see `02-design.md`, which supersedes §4–§5 here.** Corrections made after phase 2 are listed at the end.
 Every claim below cites the file/function it came from. Items marked **UNVERIFIED** could not be
 confirmed from the reference sources and must not be treated as fact.
 
@@ -183,3 +184,14 @@ ISR (`SdhcSlotInterrupt` equivalent): read `MINT`/`IDST`, latch into the extensi
 6. **Scope of speed.** Stop at 25 MHz first, then 50 MHz high-speed? *Default: yes.*
 
 If you answer nothing, I proceed to phase 3 with the defaults above.
+
+
+## Corrections and decisions after phase 2
+
+* **F7 was wrong.** `AistopGit/dwcmshc` is *not* SDHCI-compatible: it is a classic **DesignWare MMC** (`CTRL/PWREN/CLKDIV/CLKENA/CTYPE/RINTSTS/IDSTS`) miniport for sdport.
+  That makes it the closest structural reference for the Allwinner SMHC (same lineage: `RINT` bit layout, IDMAC, FIFO thresholds), and the driver follows its request/event handling
+  where the Microsoft sample is SDHCI-specific.
+* **Firmware**: the platform runs **mu-silicium**, not OrangePiZero3Pkg; the owner states it leaves the card powered at 24 MHz. Option (a) is therefore used *without* any CCU window:
+  the card clock is derived from the 24 MHz module clock with the SMHC-internal divider only (see `02-design.md` §1, §5). The ACPI node needs no changes.
+* **Decision outcomes**: DMA uses sdport's SG list and descriptor buffer (PIO is the default so the first bring-up has no cache dependence); source-only delivery plus a host-side emulator
+  instead of a WDK CI job (a CI job for the WDK build could not be validated here); no hot-plug; stop at 24 MHz (no 50 MHz without the CCU).
